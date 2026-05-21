@@ -1,32 +1,41 @@
 # powerdns-in-a-box
 
-A self-contained PowerDNS Authoritative + dnsdist + Poweradmin + MariaDB stack
-that runs on Rocky Linux 9 with `podman-compose`. Intended deployment path is
-`/root/powerdns/` on the target server.
+A self-contained PowerDNS Authoritative + dnsdist + PowerDNS-Admin + MariaDB
+stack that runs on Rocky Linux 9 with `podman-compose`. Intended deployment
+path is `/root/git/powerdns-in-a-box/` on the target server.
 
 ## Stack
 
-| Service      | Image                                | Role                                      | Host port      |
-| ------------ | ------------------------------------ | ----------------------------------------- | -------------- |
-| `dnsdist`    | `powerdns/dnsdist-19:latest`         | Frontend load balancer / ACL on port 53   | `53/tcp+udp`   |
-| `pdns`       | `powerdns/pdns-auth-49:latest`       | Authoritative DNS, gmysql backend         | internal 5300  |
-| `poweradmin` | `poweradmin/poweradmin:stable`       | Web admin UI for PowerDNS                 | `8090/tcp`     |
-| `mariadb`    | `mariadb:10.11`                      | Backend DB for both PowerDNS and Poweradmin | internal 3306 |
+| Service          | Image                                   | Role                                       | Host port        |
+| ---------------- | --------------------------------------- | ------------------------------------------ | ---------------- |
+| `dnsdist`        | `powerdns/dnsdist-19:latest`            | Frontend ACL / load balancer on port 53    | `53/tcp+udp`     |
+| `pdns`           | `powerdns/pdns-auth-49:latest`          | Authoritative DNS, gmysql backend          | internal 5300    |
+| `powerdns-admin` | `powerdnsadmin/pda-legacy:latest`       | Flask web UI; talks to PowerDNS HTTP API   | `9090/tcp`       |
+| `mariadb`        | `mariadb:10.11`                         | Backend DB for PowerDNS and PowerDNS-Admin | internal 3306    |
 
 DNS queries hit `dnsdist` on port 53, which forwards everything to `pdns` on
-internal port 5300. Poweradmin talks to PowerDNS over the compose network via
-the HTTP API at `http://pdns:8081` and writes records directly to the `pdns`
-database in MariaDB.
+internal port 5300. PowerDNS-Admin talks to PowerDNS over the compose network
+via the HTTP API at `http://pdns:8081` and stores its own users/settings in a
+separate `powerdns_admin` database in MariaDB. PowerDNS itself uses the `pdns`
+database via the gmysql backend.
+
+Two databases, two SQL users:
+
+- `pdns@%` → owns the `pdns` database (zones, records, DNSSEC keys, ...)
+- `pda@%`  → owns the `powerdns_admin` database (PDA users, settings, history)
+
+PowerDNS-Admin never touches the `pdns` database directly — all zone changes
+go through the PowerDNS HTTP API.
 
 ## Layout
 
 ```
 .
 ├── compose.yml              # podman-compose stack definition
-├── .env                     # passwords, API key, NS records (edit before deploy)
+├── .env                     # passwords, API key, dnsdist bind IP (edit before deploy)
 ├── pdns/pdns.conf           # PowerDNS authoritative config (gmysql + API)
 ├── dnsdist/dnsdist.conf     # dnsdist frontend config
-└── mysql-init/01-init.sql   # one-shot DB init: databases, users, schema
+└── mysql-init/01-init.sql   # one-shot DB init: databases + users + PowerDNS schema
 ```
 
 `mysql-data/` is created on first start and holds the MariaDB data directory.
@@ -35,32 +44,33 @@ database in MariaDB.
 
 - Rocky Linux 9 (or RHEL/Alma 9)
 - `podman` and `podman-compose` installed
-- Port 53 free on the host (see "Free up port 53" below)
+- Port 53 free on the IP that `DNSDIST_BIND_IP` points at (see "Port 53" below)
 
 ## Deploy
 
-1. Copy this directory to the target server as `/root/powerdns`:
+1. Copy this directory to the target server:
 
    ```bash
-   scp -r . root@server:/root/powerdns
+   scp -r . root@server:/root/git/powerdns-in-a-box
    ssh root@server
-   cd /root/powerdns
+   cd /root/git/powerdns-in-a-box
    ```
 
-2. **Edit `.env`** and replace every `Change*` placeholder. The same passwords
-   and API key must also appear in `pdns/pdns.conf` and `mysql-init/01-init.sql`
-   — mismatches are the #1 source of `ERROR 1045` (MySQL access denied) at
-   startup.
+2. **Edit `.env`** and replace every `CHANGE_ME_*` placeholder with strong
+   secrets. The same values must also appear in `pdns/pdns.conf` and
+   `mysql-init/01-init.sql` — mismatches are the #1 source of `ERROR 1045`
+   (MySQL access denied) at startup. Set `DNSDIST_BIND_IP` to the public
+   IPv4 that should answer DNS queries.
 
-   Values that must match:
+   Values that must match across files:
 
-   | `.env`             | `pdns/pdns.conf`     | `mysql-init/01-init.sql`            |
-   | ------------------ | -------------------- | ----------------------------------- |
-   | `PDNS_DB_PASS`     | `gmysql-password`    | `'pdns'@'%' IDENTIFIED BY ...`      |
-   | `PDNS_API_KEY`     | `api-key`            | —                                   |
-   | `PA_DB_PASS`       | —                    | `'poweradmin'@'%' IDENTIFIED BY ...` |
+   | `.env`              | `pdns/pdns.conf`     | `mysql-init/01-init.sql`           |
+   | ------------------- | -------------------- | ---------------------------------- |
+   | `PDNS_DB_PASS`      | `gmysql-password`    | `'pdns'@'%' IDENTIFIED BY ...`     |
+   | `PDNS_API_KEY`      | `api-key`            | —                                  |
+   | `PDA_DB_PASS`       | —                    | `'pda'@'%' IDENTIFIED BY ...`      |
 
-3. Free up port 53 (see next section).
+3. Free up port 53 on the bind IP (see next section).
 
 4. Start the stack:
 
@@ -69,20 +79,34 @@ database in MariaDB.
    podman-compose ps
    ```
 
-5. Open the firewall:
+5. Wait for PowerDNS-Admin to migrate its schema (first run only, ~30s), then
+   create the first admin user:
+
+   ```bash
+   podman exec -it powerdns-admin flask user create-admin \
+     --username "$PDA_ADMIN_USERNAME" \
+     --password "$PDA_ADMIN_PASSWORD" \
+     --email    "$PDA_ADMIN_EMAIL" \
+     --firstname Admin --lastname User
+   ```
+
+6. Open the firewall — DNS to the world, admin UI restricted by source IP:
 
    ```bash
    firewall-cmd --permanent --add-service=dns
-   firewall-cmd --permanent --add-port=8090/tcp
+   firewall-cmd --permanent --add-rich-rule='rule family="ipv4" \
+     source address="YOUR_TRUSTED_CIDR" port port="9090" protocol="tcp" accept'
    firewall-cmd --reload
    ```
 
-6. Poweradmin should be reachable at `http://<server>:8090`, log in with
-   `PA_ADMIN_USERNAME` / `PA_ADMIN_PASSWORD` from `.env`.
+7. PowerDNS-Admin is now reachable at `http://<server>:9090` from the
+   allowlisted IPs. Log in, then under **Settings → PDNS** point it at the
+   API: URL `http://pdns:8081`, version `4.x`, and the API key from `.env`.
 
-## Free up port 53
+## Port 53
 
-Rocky 9 hosts usually have two things competing for port 53:
+The `dnsdist` container needs to bind port 53 on the host. Two things commonly
+hold it on a Rocky 9 host:
 
 ### systemd-resolved
 
@@ -91,34 +115,27 @@ systemctl stop systemd-resolved
 systemctl disable systemd-resolved
 ```
 
-Edit `/etc/systemd/resolved.conf` and set:
-
-```ini
-[Resolve]
-DNSStubListener=no
-```
-
-If `/etc/resolv.conf` is a symlink to systemd-resolved, replace it with a
-regular file pointing at an upstream resolver (e.g. `nameserver 1.1.1.1`) so
-the host keeps internet access.
+Edit `/etc/systemd/resolved.conf` and set `DNSStubListener=no` under
+`[Resolve]`. If `/etc/resolv.conf` is a symlink to systemd-resolved, replace it
+with a regular file pointing at an upstream resolver so the host keeps
+internet access.
 
 ### Podman's aardvark-dns
 
-By default `aardvark-dns` binds port 53 on each bridge network. Edit
-`/etc/containers/containers.conf`:
+Podman runs `aardvark-dns` on the gateway of every bridge network it manages,
+and that daemon binds port 53 on each network's gateway IP. There are two ways
+to handle this:
 
-```ini
-[network]
-dns_bind_port = 5353
-```
+- **Global move**: set `[network]\ndns_bind_port = 5353` in
+  `/etc/containers/containers.conf` and restart podman / the affected
+  containers. Cleanest, but every existing container network has to come
+  back up.
+- **Per-IP bind**: set `DNSDIST_BIND_IP` in `.env` to the host's public IP so
+  that dnsdist binds only on that address. `aardvark-dns` keeps binding its
+  bridge gateway (e.g. `10.89.0.1:53`) and the two coexist. This is the path
+  used when you don't want to disturb other podman stacks on the same host.
 
-Then restart Podman:
-
-```bash
-systemctl restart podman
-```
-
-Verify port 53 is free before starting the stack:
+Verify after starting:
 
 ```bash
 ss -lptn 'sport = :53'
@@ -127,21 +144,22 @@ ss -lptn 'sport = :53'
 ## Verification
 
 ```bash
-podman-compose ps                # all four containers should be Up / healthy
-podman logs -f pdns-auth         # should connect to mariadb, no schema errors
-podman logs -f poweradmin        # should reach mariadb and PowerDNS API
-dig @127.0.0.1 -p 53 example.com # should reach dnsdist → pdns
+podman-compose ps                                # all four containers Up / healthy
+podman logs -f pdns-auth                         # no gmysql errors, API on :8081
+podman logs -f powerdns-admin                    # migrations complete, gunicorn ready
+dig @<DNSDIST_BIND_IP> -p 53 something.local +short
 ```
 
 ## Troubleshooting
 
-| Symptom                                                | Fix                                                                                                                                  |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `bind: address already in use` on port 53              | See "Free up port 53" — systemd-resolved or aardvark-dns is holding it.                                                              |
-| `ERROR 1045 ... 'poweradmin'@'10.89.0.x'`              | Password mismatch between `.env` and the user row in MariaDB. `ALTER USER 'poweradmin'@'%' IDENTIFIED BY '...';` to the `.env` value. |
-| `Unknown MySQL server host 'mysql'`                    | `pdns.conf` still references the old `mysql` service name. It must say `gmysql-host=mariadb`.                                        |
-| `Table 'pdns.domains' doesn't exist`                   | DB volume was created before the schema was added. `podman-compose down && rm -rf mysql-data && podman-compose up -d`.                |
-| `ERROR 1410 (42000): not allowed to create user with GRANT` | MySQL 8 / MariaDB requires explicit `CREATE USER` before `GRANT`. Run `CREATE USER IF NOT EXISTS ...` first.                         |
+| Symptom                                                | Fix                                                                                                                                       |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `bind: address already in use` on port 53              | See "Port 53" — systemd-resolved or aardvark-dns is holding it. Either move them off 53 or bind dnsdist to a specific host IP.            |
+| `ERROR 1045 ... 'pda'@'10.89.0.x'`                     | Password mismatch between `.env` and the user row in MariaDB. `ALTER USER 'pda'@'%' IDENTIFIED BY '...';` to the `.env` value, then restart powerdns-admin. |
+| `Unknown MySQL server host 'mysql'`                    | `pdns.conf` still references the old `mysql` service name. It must say `gmysql-host=mariadb`.                                              |
+| `Table 'pdns.domains' doesn't exist`                   | DB volume was created before the schema was added. `podman-compose down && rm -rf mysql-data && podman-compose up -d`.                    |
+| `ERROR 1410 (42000): not allowed to create user with GRANT` | MariaDB 10.11 inherits MySQL 8's rule that `GRANT` won't auto-create a user. Run `CREATE USER IF NOT EXISTS ...` first.              |
+| PowerDNS-Admin login page works but zone list is empty | Settings → PDNS not configured. Set API URL `http://pdns:8081`, API key from `.env`, version `4.x`, save.                                 |
 
 ## Notes
 
@@ -151,5 +169,7 @@ dig @127.0.0.1 -p 53 example.com # should reach dnsdist → pdns
   directory). Edits made after the first start do not retroactively apply —
   either run them manually with `mariadb -uroot -p` or wipe `mysql-data/` and
   recreate.
-- The example `.env` ships with weak placeholder passwords. Replace them before
-  any deployment that's reachable from the network.
+- The example `.env` ships with `CHANGE_ME_*` placeholders. Replace them
+  before any deployment that's reachable from the network. The `pdns.conf` and
+  `01-init.sql` files contain the same placeholders and must be rewritten in
+  lockstep.

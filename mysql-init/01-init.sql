@@ -1,12 +1,16 @@
-CREATE DATABASE IF NOT EXISTS pdns CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS poweradmin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- Passwords below are placeholders. On deploy they are rewritten in place
+-- with strong random values that match .env. PowerDNS-Admin manages its
+-- own schema inside powerdns_admin via Flask migrations; we only create
+-- the database and user here.
 
-CREATE USER IF NOT EXISTS 'pdns'@'%' IDENTIFIED BY 'ChangePdnsDbPass123!';
-CREATE USER IF NOT EXISTS 'poweradmin'@'%' IDENTIFIED BY 'ChangePoweradminDbPass123!';
+CREATE DATABASE IF NOT EXISTS pdns CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS powerdns_admin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE USER IF NOT EXISTS 'pdns'@'%' IDENTIFIED BY 'CHANGE_ME_PDNS_DB';
+CREATE USER IF NOT EXISTS 'pda'@'%' IDENTIFIED BY 'CHANGE_ME_PDA_DB';
 
 GRANT ALL PRIVILEGES ON pdns.* TO 'pdns'@'%';
-GRANT ALL PRIVILEGES ON poweradmin.* TO 'poweradmin'@'%';
-GRANT ALL PRIVILEGES ON pdns.* TO 'poweradmin'@'%';
+GRANT ALL PRIVILEGES ON powerdns_admin.* TO 'pda'@'%';
 
 FLUSH PRIVILEGES;
 

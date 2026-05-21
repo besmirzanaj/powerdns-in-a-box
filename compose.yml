@@ -39,12 +39,12 @@ services:
     volumes:
       - ./dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro,Z
     ports:
-      - "53:53/tcp"
-      - "53:53/udp"
+      - "${DNSDIST_BIND_IP}:53:53/tcp"
+      - "${DNSDIST_BIND_IP}:53:53/udp"
 
-  poweradmin:
-    image: docker.io/poweradmin/poweradmin:stable
-    container_name: poweradmin
+  powerdns-admin:
+    image: docker.io/powerdnsadmin/pda-legacy:latest
+    container_name: powerdns-admin
     restart: unless-stopped
     depends_on:
       mariadb:
@@ -52,23 +52,11 @@ services:
       pdns:
         condition: service_started
     environment:
-      PA_CREATE_ADMIN: "true"
-      PA_ADMIN_USERNAME: ${PA_ADMIN_USERNAME}
-      PA_ADMIN_PASSWORD: ${PA_ADMIN_PASSWORD}
-      PA_ADMIN_EMAIL: ${PA_ADMIN_EMAIL}
-      DB_TYPE: mysql
-      DB_HOST: mariadb
-      DB_PORT: 3306
-      DB_USER: ${PA_DB_USER}
-      DB_PASS: ${PA_DB_PASS}
-      DB_NAME: ${PA_DB_NAME}
-      PA_PDNS_DB_NAME: ${PDNS_DB_NAME}
-      PA_PDNS_API_URL: http://pdns:8081
-      PA_PDNS_API_KEY: ${PDNS_API_KEY}
-      DNS_NS1: ${DNS_NS1}
-      DNS_NS2: ${DNS_NS2}
-      DNS_HOSTMASTER: ${DNS_HOSTMASTER}
-      PA_APP_TITLE: Poweradmin
-      PA_TIMEZONE: Europe/Rome
+      SQLALCHEMY_DATABASE_URI: mysql://${PDA_DB_USER}:${PDA_DB_PASS}@mariadb/${PDA_DB_NAME}
+      SECRET_KEY: ${PDA_SECRET_KEY}
+      GUNICORN_TIMEOUT: "60"
+      GUNICORN_WORKERS: "2"
+      GUNICORN_LOGLEVEL: "INFO"
+      OFFLINE_MODE: "False"
     ports:
-      - "8090:80"
+      - "9090:80"
