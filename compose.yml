@@ -56,11 +56,17 @@ services:
     user: "0:0"
     depends_on:
       - pdns
+    environment:
+      DNSDIST_WEBSERVER_PASSWORD: ${DNSDIST_WEBSERVER_PASSWORD}
+      DNSDIST_API_KEY: ${DNSDIST_API_KEY}
     volumes:
       - ./dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro,Z
+    # 53 to the world; 8083 (dnsdist web console + API) on the public IP
+    # but firewalled to trusted source IPs at the host.
     ports:
       - "${DNSDIST_BIND_IP}:53:53/tcp"
       - "${DNSDIST_BIND_IP}:53:53/udp"
+      - "${DNSDIST_BIND_IP}:8083:8083/tcp"
     networks:
       default:
         ipv4_address: 10.89.1.20
