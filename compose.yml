@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  mariadb:
+    image: docker.io/library/mariadb:10.11
+    container_name: pdns-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./mysql-data:/var/lib/mysql:Z
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro,Z
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  pdns:
+    image: docker.io/powerdns/pdns-auth-49:latest
+    container_name: pdns-auth
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    volumes:
+      - ./pdns/pdns.conf:/etc/powerdns/pdns.conf:ro,Z
+    expose:
+      - "5300/tcp"
+      - "5300/udp"
+      - "8081/tcp"
+
+  dnsdist:
+    image: docker.io/powerdns/dnsdist-19:latest
+    container_name: dnsdist
+    restart: unless-stopped
+    depends_on:
+      - pdns
+    volumes:
+      - ./dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro,Z
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+
+  poweradmin:
+    image: docker.io/poweradmin/poweradmin:stable
+    container_name: poweradmin
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      pdns:
+        condition: service_started
+    environment:
+      PA_CREATE_ADMIN: "true"
+      PA_ADMIN_USERNAME: ${PA_ADMIN_USERNAME}
+      PA_ADMIN_PASSWORD: ${PA_ADMIN_PASSWORD}
+      PA_ADMIN_EMAIL: ${PA_ADMIN_EMAIL}
+      DB_TYPE: mysql
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_USER: ${PA_DB_USER}
+      DB_PASS: ${PA_DB_PASS}
+      DB_NAME: ${PA_DB_NAME}
+      PA_PDNS_DB_NAME: ${PDNS_DB_NAME}
+      PA_PDNS_API_URL: http://pdns:8081
+      PA_PDNS_API_KEY: ${PDNS_API_KEY}
+      DNS_NS1: ${DNS_NS1}
+      DNS_NS2: ${DNS_NS2}
+      DNS_HOSTMASTER: ${DNS_HOSTMASTER}
+      PA_APP_TITLE: Poweradmin
+      PA_TIMEZONE: Europe/Rome
+    ports:
+      - "8090:80"
