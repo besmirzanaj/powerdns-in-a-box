@@ -1,5 +1,13 @@
 version: "3.9"
 
+networks:
+  default:
+    name: powerdns-in-a-box_default
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.1.0/24
+
 services:
   mariadb:
     image: docker.io/library/mariadb:10.11
@@ -29,11 +37,18 @@ services:
       - "5300/tcp"
       - "5300/udp"
       - "8081/tcp"
+    networks:
+      default:
+        ipv4_address: 10.89.1.10
 
   dnsdist:
     image: docker.io/powerdns/dnsdist-19:latest
     container_name: dnsdist
     restart: unless-stopped
+    # Run as root so dnsdist can bind privileged port 53 inside the container.
+    # Image default user (pdns/uid 953) cannot bind <1024 under SELinux-managed
+    # capabilities on Podman/Rocky 9.
+    user: "0:0"
     depends_on:
       - pdns
     volumes:
@@ -41,6 +56,9 @@ services:
     ports:
       - "${DNSDIST_BIND_IP}:53:53/tcp"
       - "${DNSDIST_BIND_IP}:53:53/udp"
+    networks:
+      default:
+        ipv4_address: 10.89.1.20
 
   powerdns-admin:
     image: docker.io/powerdnsadmin/pda-legacy:latest
