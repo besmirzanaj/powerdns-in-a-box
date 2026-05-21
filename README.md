@@ -143,12 +143,102 @@ ss -lptn 'sport = :53'
 
 ## Verification
 
+Process- and container-level checks. For DNS resolution checks, see the
+next section.
+
 ```bash
 podman-compose ps                                # all four containers Up / healthy
 podman logs -f pdns-auth                         # no gmysql errors, API on :8081
 podman logs -f powerdns-admin                    # migrations complete, gunicorn ready
-dig @<DNSDIST_BIND_IP> -p 53 something.local +short
+ss -lptn 'sport = :53'                           # confirms dnsdist holds the bind IP
 ```
+
+## DNS validation with dig
+
+Once a zone exists in PowerDNS, walk through these checks. They climb from
+"the local stack works" up to "the world resolves this zone correctly".
+Substitute your values for `<your.zone>` and `<DNSDIST_BIND_IP>`.
+
+### 1. Direct query against this server (authoritative answer)
+
+Confirms that dnsdist forwards to pdns and pdns serves the zone:
+
+```bash
+dig @<DNSDIST_BIND_IP> <your.zone> +short
+dig @<DNSDIST_BIND_IP> www.<your.zone> +short
+```
+
+The `aa` flag must be set on the response — that's the marker that the
+answer came from an authoritative server, not a cache:
+
+```bash
+dig @<DNSDIST_BIND_IP> <your.zone> | grep -E 'flags|status'
+# Expected: status: NOERROR  /  flags: qr aa rd
+```
+
+### 2. SOA and NS
+
+```bash
+dig @<DNSDIST_BIND_IP> <your.zone> SOA +short
+dig @<DNSDIST_BIND_IP> <your.zone> NS  +short
+```
+
+The SOA's first field (MNAME) should be the primary nameserver. The NS list
+should contain at least one in-bailiwick name (e.g. `ns.<your.zone>.`) — that
+name must also have a glue A record at the **parent** zone, otherwise no
+recursive resolver can find your server from the root.
+
+### 3. PowerDNS HTTP API (proves pdns ↔ MariaDB is healthy)
+
+```bash
+cd /root/git/powerdns-in-a-box
+API_KEY=$(grep ^PDNS_API_KEY .env | cut -d= -f2)
+curl -sS -H "X-API-Key: ${API_KEY}" \
+  http://10.89.1.10:8081/api/v1/servers/localhost/zones | python3 -m json.tool
+```
+
+A JSON array of zones (possibly empty) means the API is up and the backend
+DB is reachable.
+
+### 4. Delegation trace from the root
+
+This only works once the parent zone has been updated to delegate to your
+server. It's the canonical "is this zone really on the public internet" test:
+
+```bash
+dig +trace +nodnssec <your.zone>
+```
+
+You want the trace to descend `.` → `<tld>.` → `<parent>.` → `<your.zone>.`,
+with the final hop answered by your VPS's IP. The last line should look like:
+
+```
+<your.zone>. 300 IN A <ip>
+;; Received N bytes from <DNSDIST_BIND_IP>#53(ns.<your.zone>) in M ms
+```
+
+### 5. Through a public recursive resolver
+
+Confirms the world sees it the same way you do:
+
+```bash
+dig @1.1.1.1 <your.zone> +short
+dig @8.8.8.8 <your.zone> +short
+```
+
+If these match what you see when querying `@<DNSDIST_BIND_IP>` directly,
+the delegation and glue at the parent are correctly in place.
+
+### 6. Common dig failures
+
+| `dig` output                                   | What it means                                                                                          |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `status: REFUSED` from `@<DNSDIST_BIND_IP>`    | The zone doesn't exist on this server. Create it in PowerDNS-Admin or via the API first.               |
+| `status: SERVFAIL` from `@<DNSDIST_BIND_IP>`   | pdns is up but can't query its backend — check `podman logs pdns-auth` for gmysql errors.              |
+| `status: NXDOMAIN`                             | The record name isn't in the zone. Verify it was added with the right name and trailing dot.           |
+| Correct locally, NXDOMAIN via `@1.1.1.1`       | Parent delegation isn't published. Update the parent zone's NS + glue and wait for its TTL to expire.  |
+| Local answer has no `aa` flag                  | Reply came from a cache, not the authoritative server. Always query the auth IP for validation.        |
+| `+trace` stops at `<parent>.`                  | The parent has no NS records pointing at your server, or they point at an unresolvable name (no glue). |
 
 ## Troubleshooting
 
