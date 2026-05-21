@@ -37,6 +37,11 @@ services:
       - "5300/tcp"
       - "5300/udp"
       - "8081/tcp"
+    # Publish the HTTP API / webserver on the host's public IP so it can be
+    # reached from operator workstations. Always pair this with a firewalld
+    # rich rule that allows only trusted source IPs to port 8081/tcp.
+    ports:
+      - "${DNSDIST_BIND_IP}:8081:8081/tcp"
     networks:
       default:
         ipv4_address: 10.89.1.10

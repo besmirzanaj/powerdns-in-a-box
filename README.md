@@ -90,12 +90,17 @@ go through the PowerDNS HTTP API.
      --firstname Admin --lastname User
    ```
 
-6. Open the firewall — DNS to the world, admin UI restricted by source IP:
+6. Open the firewall — DNS to the world, admin UI and PowerDNS API
+   restricted by source IP:
 
    ```bash
    firewall-cmd --permanent --add-service=dns
+   # PowerDNS-Admin UI
    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" \
      source address="YOUR_TRUSTED_CIDR" port port="9090" protocol="tcp" accept'
+   # PowerDNS HTTP API / webserver (only published on the public IP via compose)
+   firewall-cmd --permanent --add-rich-rule='rule family="ipv4" \
+     source address="YOUR_TRUSTED_CIDR" port port="8081" protocol="tcp" accept'
    firewall-cmd --reload
    ```
 
