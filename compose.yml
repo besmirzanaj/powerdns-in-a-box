@@ -37,11 +37,12 @@ services:
       - "5300/tcp"
       - "5300/udp"
       - "8081/tcp"
-    # Publish the HTTP API / webserver on the host's public IP so it can be
-    # reached from operator workstations. Always pair this with a firewalld
-    # rich rule that allows only trusted source IPs to port 8081/tcp.
+    # Publish the HTTP API / webserver on loopback only. Operators reach it
+    # via SSH tunnel: ssh -L 8081:127.0.0.1:8081 root@<host>.
+    # Internal container-to-container access (PowerDNS-Admin -> pdns) still
+    # works over the compose network at 10.89.1.10:8081.
     ports:
-      - "${DNSDIST_BIND_IP}:8081:8081/tcp"
+      - "127.0.0.1:8081:8081/tcp"
     networks:
       default:
         ipv4_address: 10.89.1.10
@@ -61,12 +62,13 @@ services:
       DNSDIST_API_KEY: ${DNSDIST_API_KEY}
     volumes:
       - ./dnsdist/dnsdist.conf:/etc/dnsdist/dnsdist.conf:ro,Z
-    # 53 to the world; 8083 (dnsdist web console + API) on the public IP
-    # but firewalled to trusted source IPs at the host.
+    # DNS (53) bound to the host's public IP. The dnsdist web console / API
+    # on 8083 is bound to loopback only — reach it via SSH tunnel:
+    #   ssh -L 8083:127.0.0.1:8083 root@<host>
     ports:
       - "${DNSDIST_BIND_IP}:53:53/tcp"
       - "${DNSDIST_BIND_IP}:53:53/udp"
-      - "${DNSDIST_BIND_IP}:8083:8083/tcp"
+      - "127.0.0.1:8083:8083/tcp"
     networks:
       default:
         ipv4_address: 10.89.1.20
@@ -87,5 +89,7 @@ services:
       GUNICORN_WORKERS: "2"
       GUNICORN_LOGLEVEL: "INFO"
       OFFLINE_MODE: "False"
+    # Loopback only — reach via SSH tunnel:
+    #   ssh -L 9090:127.0.0.1:9090 root@<host>
     ports:
-      - "9090:80"
+      - "127.0.0.1:9090:80"
