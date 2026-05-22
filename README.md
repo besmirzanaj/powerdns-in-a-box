@@ -45,68 +45,142 @@ go through the PowerDNS HTTP API.
 - Rocky Linux 9 (or RHEL/Alma 9)
 - `podman` and `podman-compose` installed
 - Port 53 free on the IP that `DNSDIST_BIND_IP` points at (see "Port 53" below)
+- A Tailscale-joined host if you want to reach the management UIs in a
+  browser without an SSH tunnel — optional, see "Network model" below
 
-## Deploy
+## Quickstart
 
-1. Copy this directory to the target server:
+Nothing real is committed — every secret in the repo is a `CHANGE_ME_*`
+placeholder, and `.env.example` is a template. Run this on the target
+server as root to generate strong random secrets and substitute them in
+lockstep across all three files that need them.
 
-   ```bash
-   scp -r . root@server:/root/git/powerdns-in-a-box
-   ssh root@server
-   cd /root/git/powerdns-in-a-box
-   ```
+```bash
+git clone https://github.com/besmirzanaj/powerdns-in-a-box /root/git/powerdns-in-a-box
+cd /root/git/powerdns-in-a-box
 
-2. **Edit `.env`** and replace every `CHANGE_ME_*` placeholder with strong
-   secrets. The same values must also appear in `pdns/pdns.conf` and
-   `mysql-init/01-init.sql` — mismatches are the #1 source of `ERROR 1045`
-   (MySQL access denied) at startup. Set `DNSDIST_BIND_IP` to the public
-   IPv4 that should answer DNS queries.
+cp .env.example .env
+chmod 600 .env
 
-   Values that must match across files:
+# 1. Generate random secrets
+MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)
+PDNS_DB_PASS=$(openssl rand -hex 16)
+PDNS_API_KEY=$(openssl rand -hex 24)
+PDA_DB_PASS=$(openssl rand -hex 16)
+PDA_SECRET_KEY=$(openssl rand -hex 32)
+PDA_ADMIN_PASSWORD=$(openssl rand -hex 16)
+DNSDIST_WEBSERVER_PASSWORD=$(openssl rand -hex 16)
+DNSDIST_API_KEY=$(openssl rand -hex 24)
 
-   | `.env`              | `pdns/pdns.conf`     | `mysql-init/01-init.sql`           |
-   | ------------------- | -------------------- | ---------------------------------- |
-   | `PDNS_DB_PASS`      | `gmysql-password`    | `'pdns'@'%' IDENTIFIED BY ...`     |
-   | `PDNS_API_KEY`      | `api-key`            | —                                  |
-   | `PDA_DB_PASS`       | —                    | `'pda'@'%' IDENTIFIED BY ...`      |
+# 2. Set host-specific values (edit these for your environment)
+DNSDIST_BIND_IP="$(curl -s4 ifconfig.me)"     # or hard-code your public IPv4
+TAILSCALE_BIND_IP="$(tailscale ip -4 2>/dev/null || echo '')"
 
-3. Free up port 53 on the bind IP (see next section).
+# 3. Substitute into .env, pdns.conf and 01-init.sql in one shot
+sed -i \
+  -e "s|CHANGE_ME_MARIADB_ROOT|${MYSQL_ROOT_PASSWORD}|" \
+  -e "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|"             \
+  -e "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|"             \
+  -e "s|CHANGE_ME_PDA_DB|${PDA_DB_PASS}|"               \
+  -e "s|CHANGE_ME_PDA_SECRET|${PDA_SECRET_KEY}|"        \
+  -e "s|CHANGE_ME_PDA_ADMIN|${PDA_ADMIN_PASSWORD}|"     \
+  -e "s|CHANGE_ME_DNSDIST_WEB|${DNSDIST_WEBSERVER_PASSWORD}|" \
+  -e "s|CHANGE_ME_DNSDIST_API|${DNSDIST_API_KEY}|"      \
+  -e "s|^DNSDIST_BIND_IP=.*|DNSDIST_BIND_IP=${DNSDIST_BIND_IP}|" \
+  -e "s|^TAILSCALE_BIND_IP=.*|TAILSCALE_BIND_IP=${TAILSCALE_BIND_IP}|" \
+  .env
 
-4. Start the stack:
+sed -i "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|g; s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g" pdns/pdns.conf
+sed -i "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|g; s|CHANGE_ME_PDA_DB|${PDA_DB_PASS}|g"   mysql-init/01-init.sql
 
-   ```bash
-   podman-compose up -d
-   podman-compose ps
-   ```
+# 4. Free port 53 (see "Port 53" below). Then:
+podman-compose up -d
 
-5. Wait for PowerDNS-Admin to migrate its schema (first run only, ~30s), then
-   create the first admin user:
+# 5. After ~30s, create the PDA admin user (the image has no env-based bootstrap):
+podman exec -i \
+  -e PDA_ADMIN_USERNAME="admin" \
+  -e PDA_ADMIN_PASSWORD="${PDA_ADMIN_PASSWORD}" \
+  -e PDA_ADMIN_EMAIL="admin@example.com" \
+  powerdns-admin flask shell <<'PY'
+import os, bcrypt
+from powerdnsadmin.models.user import User
+from powerdnsadmin.models.role import Role
+from powerdnsadmin.models.base import db
+admin_role = Role.query.filter_by(name="Administrator").first()
+pw = bcrypt.hashpw(os.environ["PDA_ADMIN_PASSWORD"].encode(), bcrypt.gensalt()).decode()
+u = User(username=os.environ["PDA_ADMIN_USERNAME"], password=pw,
+         firstname="Admin", lastname="User",
+         email=os.environ["PDA_ADMIN_EMAIL"],
+         role_id=admin_role.id, confirmed=1, reload_info=False)
+db.session.add(u); db.session.commit()
+print("admin user created")
+PY
 
-   ```bash
-   podman exec -it powerdns-admin flask user create-admin \
-     --username "$PDA_ADMIN_USERNAME" \
-     --password "$PDA_ADMIN_PASSWORD" \
-     --email    "$PDA_ADMIN_EMAIL" \
-     --firstname Admin --lastname User
-   ```
+# 6. Seed PowerDNS-Admin → PowerDNS API settings (the pda-legacy image
+#    has no env-based config for this; rows live in the setting table):
+podman exec -i pdns-mariadb mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" powerdns_admin <<SQL
+INSERT INTO setting (name, value) VALUES
+  ("pdns_api_url", "http://pdns:8081"),
+  ("pdns_api_key", "${PDNS_API_KEY}"),
+  ("pdns_version", "4.9.15")
+ON DUPLICATE KEY UPDATE value=VALUES(value);
+SQL
 
-6. Open the firewall — DNS to the world, admin UI and PowerDNS API
-   restricted by source IP:
+# 7. Firewall: DNS to the world, plus Tailscale interface in the trusted zone.
+firewall-cmd --permanent --add-service=dns
+firewall-cmd --zone=trusted --add-interface=tailscale0            # runtime
+firewall-cmd --permanent --zone=trusted --add-interface=tailscale0
+firewall-cmd --reload
+# IMPORTANT: a firewalld reload wipes podman's per-container DNAT rules.
+# Re-establish them by bouncing every running container on the host:
+podman ps -q | xargs -r podman restart
 
-   ```bash
-   firewall-cmd --permanent --add-service=dns
-   # PowerDNS-Admin UI
-   firewall-cmd --permanent --add-rich-rule='rule family="ipv4" \
-     source address="YOUR_TRUSTED_CIDR" port port="9090" protocol="tcp" accept'
-   # PowerDNS HTTP API / webserver (only published on the public IP via compose)
-   firewall-cmd --permanent --add-rich-rule='rule family="ipv4" \
-     source address="YOUR_TRUSTED_CIDR" port port="8081" protocol="tcp" accept'
-   firewall-cmd --reload
-   ```
+# 8. Print the credentials you need to save:
+echo "PDA URL    : http://${TAILSCALE_BIND_IP:-127.0.0.1}:9090/"
+echo "PDA user   : admin"
+echo "PDA pass   : ${PDA_ADMIN_PASSWORD}"
+echo "PDNS API   : ${PDNS_API_KEY}"
+echo "dnsdist UI : http://${TAILSCALE_BIND_IP:-127.0.0.1}:8083/  (admin / ${DNSDIST_WEBSERVER_PASSWORD})"
+```
 
-7. PowerDNS-Admin is now reachable at `http://<server>:9090` from the
-   allowlisted IPs. Log in, then under **Settings → PDNS** point it at the
-   API: URL `http://pdns:8081`, version `4.x`, and the API key from `.env`.
+That's the whole install. Your zone-management UI is now reachable from
+any tailnet device at `http://${TAILSCALE_BIND_IP}:9090/`, or locally
+via an SSH tunnel.
+
+## Network model
+
+Three categories of host port:
+
+| Port      | Bind IP                                  | Visibility                                          |
+| --------- | ---------------------------------------- | --------------------------------------------------- |
+| `53` TCP+UDP (dnsdist) | `${DNSDIST_BIND_IP}` (public) | Open to the world — must be, for authoritative DNS. |
+| `8081` (pdns API), `8083` (dnsdist console), `9090` (PowerDNS-Admin) | `127.0.0.1` and `${TAILSCALE_BIND_IP}` | Loopback (for SSH tunnel) + tailnet only. **Never** the public IP. |
+
+If you don't have Tailscale, leave `TAILSCALE_BIND_IP` empty and remove
+the matching `"${TAILSCALE_BIND_IP}:..."` port lines from `compose.yml`.
+Then reach the UIs from your laptop with:
+
+```bash
+ssh -L 9090:127.0.0.1:9090 -L 8081:127.0.0.1:8081 -L 8083:127.0.0.1:8083 root@<host>
+# then open http://localhost:9090/ in your browser
+```
+
+## Configuration cheatsheet
+
+The same secret has to live in three places. The Quickstart's `sed`
+commands keep them in sync; if you ever rotate a secret manually,
+remember:
+
+| Value            | `.env`             | `pdns/pdns.conf`     | `mysql-init/01-init.sql`           |
+| ---------------- | ------------------ | -------------------- | ---------------------------------- |
+| PowerDNS DB pass | `PDNS_DB_PASS`     | `gmysql-password`    | `'pdns'@'%' IDENTIFIED BY ...`     |
+| PDA DB pass      | `PDA_DB_PASS`      | —                    | `'pda'@'%' IDENTIFIED BY ...`      |
+| PowerDNS API key | `PDNS_API_KEY`     | `api-key`            | —                                  |
+
+A mismatch is the #1 cause of `ERROR 1045` (MySQL access denied) at
+startup. And remember: `mysql-init/01-init.sql` only runs on first
+boot — if you change passwords later, either `ALTER USER` inside the
+running MariaDB or wipe `mysql-data/` and re-init.
 
 ## Port 53
 

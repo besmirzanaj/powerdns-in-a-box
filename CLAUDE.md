@@ -121,10 +121,22 @@ the equivalent `ALTER USER` against the live MariaDB (or wipe `mysql-data/`).
 Restarting `powerdns-admin` alone is not enough; PowerDNS reads `pdns.conf` at
 startup, and PowerDNS-Admin re-reads `.env` at container restart.
 
-## Firewall posture
+## Network model
 
-DNS (port 53 tcp/udp) needs to be open to the world for an authoritative
-server to do its job. The PowerDNS-Admin port (`9090/tcp`) must NOT be — it
-should always be restricted to a trusted source list via a firewalld rich
-rule. There is no app-level IP allowlist inside PDA; the firewall is the only
-gate.
+DNS (port 53 tcp/udp) is bound to `${DNSDIST_BIND_IP}` and open to the world
+— it must be, for an authoritative server. Everything else (PowerDNS HTTP
+API on `8081`, dnsdist console on `8083`, PowerDNS-Admin on `9090`) is
+bound to **`127.0.0.1` + `${TAILSCALE_BIND_IP}`** in `compose.yml`. The
+public IP never sees them.
+
+Why not firewalld rich rules? They apply to the INPUT chain, but traffic
+to a podman-published port gets DNAT'd to the container and traverses
+FORWARD instead, so rich rules silently fail to match. Direct FORWARD
+rules technically work but also caused a fragility: `firewall-cmd
+--reload` flushes the entire nftables ruleset and rebuilds from
+firewalld's permanent XML — netavark's per-container DNAT rules are not
+in that XML and get wiped, taking down every podman-published port on
+the host. Recovery is `podman ps -q | xargs podman restart`, but the
+right answer is to avoid the firewalld/netavark fight: bind sensitive
+ports to non-public IPs and put `tailscale0` in firewalld's `trusted`
+zone.
