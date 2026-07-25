@@ -1,0 +1,62 @@
+# =============================================================================
+# docker-compose.postgres.yml - Postgres-backed alternative to SQLite.
+#
+# Use this override instead of the default SQLite stack when you want a
+# shared PostgreSQL database for both PowerDNS and PowerDNS-AuthAdmin:
+#
+#   cp .env.example .env
+#   # fill in all CHANGE_ME_* values, including PG_PASS
+#   docker compose -f compose.yml -f docker-compose.postgres.yml up -d
+#
+# Architecture:
+#   - Postgres replaces both the pdns-data and app-data SQLite volumes
+#   - PowerDNS uses the gpgsql backend (pdns/pdns.postgres.conf)
+#   - PowerDNS-AuthAdmin uses postgres:// DATABASE_URL
+#   - pdns-init still runs but creates an unused SQLite file (harmless)
+#
+# To revert to SQLite: stop, remove the pg-data volume, and start without
+# this override file.
+#   docker compose -f compose.yml -f docker-compose.postgres.yml down -v
+#   docker compose -f compose.yml up -d
+# =============================================================================
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: pdns-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pdns
+      POSTGRES_PASSWORD: ${PG_PASS}
+      POSTGRES_DB: powerdns
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./pdns/schema.pgsql.sql:/docker-entrypoint-initdb.d/01-pdns-schema.sql:ro,Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdns -d powerdns"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      default:
+
+  pdns:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pdns/pdns.postgres.conf:/etc/powerdns/pdns.conf:ro,Z
+    networks:
+      default:
+
+  powerdns-authadmin:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://pdns:${PG_PASS}@postgres:5432/powerdns
+    networks:
+      default:
+
+volumes:
+  pg-data:

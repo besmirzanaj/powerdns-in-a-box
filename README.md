@@ -7,6 +7,9 @@ that runs on Rocky Linux 9 with `podman-compose`. Intended deployment path is
 Three containers, no external database — PowerDNS uses the built-in gsqlite3
 backend and PowerDNS-AuthAdmin stores its own data in SQLite (named volume).
 
+For production deployments that prefer a shared database, a **PostgreSQL
+option** is also available — see [Postgres backend](#postgres-backend) below.
+
 ## Stack
 
 | Service                | Image                                              | Role                                       | Host port        |
@@ -28,15 +31,23 @@ the PowerDNS HTTP API.
 
 ```
 .
-├── compose.yml              # podman-compose stack definition
-├── .env                     # API key, dnsdist bind IP (edit before deploy)
-├── provisioning.yaml        # AuthAdmin first-boot provisioning (PDNS backend config)
-├── pdns/pdns.conf           # PowerDNS authoritative config (gsqlite3 + API)
-└── dnsdist/dnsdist.conf     # dnsdist frontend config
+├── compose.yml                  # podman-compose stack definition (SQLite default)
+├── docker-compose.postgres.yml  # override: swap SQLite → PostgreSQL
+├── .env                         # API key, secrets, dnsdist bind IP (edit before deploy)
+├── provisioning.yaml            # AuthAdmin first-boot provisioning
+├── pdns/
+│   ├── pdns.conf                # gsqlite3 backend config
+│   ├── pdns.postgres.conf       # gpgsql backend config (for Postgres override)
+│   ├── schema.sqlite3.sql       # SQLite schema (used by pdns-init)
+│   └── schema.pgsql.sql         # PostgreSQL schema (for Postgres override)
+└── dnsdist/
+    └── dnsdist.conf             # dnsdist frontend config
 ```
 
 `pdns-data` (named compose volume) holds the PowerDNS SQLite database.
 `app-data` (named compose volume) holds the AuthAdmin SQLite database.
+`pg-data` (named compose volume) holds the Postgres database when using
+the Postgres override.
 
 ## Prerequisites
 
@@ -116,6 +127,70 @@ That's the whole install. Your zone-management UI is now reachable from
 any tailnet device at `http://${TAILSCALE_BIND_IP}:9090/`, or locally
 via an SSH tunnel.
 
+## Postgres backend
+
+By default the stack uses SQLite for both PowerDNS (gsqlite3) and
+PowerDNS-AuthAdmin — zero configuration, minimum resource usage. When you
+want a shared database for backup tooling, monitoring, or future multi-replica
+scaling, a Postgres override is provided.
+
+The override swaps SQLite for a single Postgres 16 instance that serves both
+services: PowerDNS uses the `gpgsql` backend and AuthAdmin connects via
+`DATABASE_URL=postgres://...`. They share the same database (`powerdns`)
+with separate table schemas — pdns zone tables and AuthAdmin user/settings
+tables live side by side.
+
+### Quickstart (Postgres)
+
+The same `.env` is used — just add the `PG_PASS` secret and pass the override
+file to `docker compose`:
+
+```bash
+git clone https://github.com/besmirzanaj/powerdns-in-a-box /root/git/powerdns-in-a-box
+cd /root/git/powerdns-in-a-box
+
+cp .env.example .env
+chmod 600 .env
+
+# 1. Generate random secrets — same as SQLite plus PG_PASS
+PDNS_API_KEY=$(openssl rand -hex 24)
+PDA_SECRET_KEY=$(openssl rand -base64 32)
+PDA_ENCRYPTION_KEY=$(openssl rand -base64 32)
+PDA_ADMIN_PASSWORD=$(openssl rand -hex 16)
+PG_PASS=$(openssl rand -hex 16)
+DNSDIST_WEBSERVER_PASSWORD=$(openssl rand -hex 16)
+DNSDIST_API_KEY=$(openssl rand -hex 24)
+
+# 2. Set host-specific values
+DNSDIST_BIND_IP="$(curl -s4 ifconfig.me)"
+TAILSCALE_BIND_IP="$(tailscale ip -4 2>/dev/null || echo '')"
+
+# 3. Substitute into .env, pdns config and provisioning.yaml
+sed -i \
+  -e "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|"             \
+  -e "s|CHANGE_ME_PDA_SECRET|${PDA_SECRET_KEY}|"        \
+  -e "s|CHANGE_ME_PDA_ENCRYPTION|${PDA_ENCRYPTION_KEY}|" \
+  -e "s|CHANGE_ME_PDA_ADMIN|${PDA_ADMIN_PASSWORD}|"     \
+  -e "s|CHANGE_ME_PG_PASS|${PG_PASS}|"                  \
+  -e "s|CHANGE_ME_DNSDIST_WEB|${DNSDIST_WEBSERVER_PASSWORD}|" \
+  -e "s|CHANGE_ME_DNSDIST_API|${DNSDIST_API_KEY}|"      \
+  -e "s|^DNSDIST_BIND_IP=.*|DNSDIST_BIND_IP=${DNSDIST_BIND_IP}|" \
+  -e "s|^TAILSCALE_BIND_IP=.*|TAILSCALE_BIND_IP=${TAILSCALE_BIND_IP}|" \
+  .env
+
+sed -i "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g; s|CHANGE_ME_PG_PASS|${PG_PASS}|g" pdns/pdns.postgres.conf
+sed -i "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g"                                   provisioning.yaml
+
+# 4. Start with the Postgres override
+podman-compose -f compose.yml -f docker-compose.postgres.yml up -d
+```
+
+The rest is identical to the SQLite stack — admin bootstrap, firewall rules,
+DNS validation.
+
+To switch back to SQLite: `podman-compose -f compose.yml -f docker-compose.postgres.yml down -v`,
+then `podman-compose up -d` (without the override).
+
 ## Network model
 
 Two categories of host port:
@@ -136,11 +211,13 @@ ssh -L 9090:127.0.0.1:9090 -L 8081:127.0.0.1:8081 -L 8083:127.0.0.1:8083 root@<h
 
 ## Configuration cheatsheet
 
-Only one secret spans multiple files — everything else is single-file:
+Only one secret spans multiple files in the default SQLite stack — everything
+else is single-file. The Postgres override adds a second multi-file secret:
 
-| Value            | `.env`             | `pdns/pdns.conf`     | `provisioning.yaml` |
-| ---------------- | ------------------ | -------------------- | ------------------- |
-| PowerDNS API key | `PDNS_API_KEY`     | `api-key`            | `api_key:`          |
+| Value               | `.env`             | `pdns/pdns.conf`       | `pdns/pdns.postgres.conf` | `provisioning.yaml` |
+| ------------------- | ------------------ | ---------------------- | ------------------------- | ------------------- |
+| PowerDNS API key    | `PDNS_API_KEY`     | `api-key`              | `api-key`                 | `api_key:`          |
+| Postgres password   | `PG_PASS`          | —                      | `gpgsql-password`         | —                   |
 
 ## Port 53
 
@@ -300,5 +377,5 @@ the delegation and glue at the parent are correctly in place.
   `podman-compose down && podman volume rm powerdns-in-a-box_pdns-data && podman-compose up -d`.
 - To reset AuthAdmin without affecting DNS data:
   `podman-compose down && podman volume rm powerdns-in-a-box_app-data && podman-compose up -d`.
-- PowerDNS creates the gsqlite3 schema automatically on first start — no
+- The `pdns-init` container creates the gsqlite3 schema on first boot — no
   init scripts needed.
