@@ -25,7 +25,7 @@ services:
       retries: 20
 
   pdns:
-    image: docker.io/powerdns/pdns-auth-49:latest
+    image: docker.io/powerdns/pdns-auth-51:latest
     container_name: pdns-auth
     restart: unless-stopped
     depends_on:
@@ -76,24 +76,36 @@ services:
       default:
         ipv4_address: 10.89.1.20
 
-  powerdns-admin:
-    image: docker.io/powerdnsadmin/pda-legacy:latest
-    container_name: powerdns-admin
+  powerdns-authadmin:
+    image: ghcr.io/powerdns-authadmin/powerdns-authadmin:latest
+    container_name: powerdns-authadmin
     restart: unless-stopped
     depends_on:
-      mariadb:
-        condition: service_healthy
       pdns:
         condition: service_started
     environment:
-      SQLALCHEMY_DATABASE_URI: mysql://${PDA_DB_USER}:${PDA_DB_PASS}@mariadb/${PDA_DB_NAME}
-      SECRET_KEY: ${PDA_SECRET_KEY}
-      GUNICORN_TIMEOUT: "60"
-      GUNICORN_WORKERS: "2"
-      GUNICORN_LOGLEVEL: "INFO"
-      OFFLINE_MODE: "False"
+      APP_URL: http://${TAILSCALE_BIND_IP:-127.0.0.1}:9090
+      APP_SECRET_KEY: ${PDA_SECRET_KEY}
+      APP_ENCRYPTION_KEY: ${PDA_ENCRYPTION_KEY}
+      DATABASE_URL: file:/data/powerdns_authadmin.db
+      BOOTSTRAP_ADMIN_EMAIL: ${PDA_ADMIN_EMAIL}
+      BOOTSTRAP_ADMIN_PASSWORD: ${PDA_ADMIN_PASSWORD}
+      LOCAL_AUTH_ENABLED: "true"
+      APP_PDNS_ALLOW_PRIVATE_NETWORKS: "true"
+      APP_PDNS_ALLOW_INSECURE_HTTP: "true"
+      LOG_LEVEL: info
+      PROVISIONING_FILE: /etc/powerdns-authadmin/provisioning.yaml
+      PROVISION_ON_BOOT: "true"
+      MIGRATE_ON_BOOT: "true"
+      SEED_ON_BOOT: "true"
+    volumes:
+      - app-data:/data
+      - ./provisioning.yaml:/etc/powerdns-authadmin/provisioning.yaml:ro,Z
     # Loopback + the host's Tailscale IP. Operators reach the UI at
     # http://${TAILSCALE_BIND_IP}:9090/ from any tailnet device.
     ports:
-      - "127.0.0.1:9090:80"
-      - "${TAILSCALE_BIND_IP}:9090:80"
+      - "127.0.0.1:9090:3000"
+      - "${TAILSCALE_BIND_IP}:9090:3000"
+
+volumes:
+  app-data:

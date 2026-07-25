@@ -1,16 +1,11 @@
 -- Passwords below are placeholders. On deploy they are rewritten in place
--- with strong random values that match .env. PowerDNS-Admin manages its
--- own schema inside powerdns_admin via Flask migrations; we only create
--- the database and user here.
+-- with strong random values that match .env.
 
 CREATE DATABASE IF NOT EXISTS pdns CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS powerdns_admin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE USER IF NOT EXISTS 'pdns'@'%' IDENTIFIED BY 'CHANGE_ME_PDNS_DB';
-CREATE USER IF NOT EXISTS 'pda'@'%' IDENTIFIED BY 'CHANGE_ME_PDA_DB';
+CREATE USER IF NOT EXISTS 'pdns'@'%' IDENTIFIED BY '20575b243134db403da3c9f6e04d25d9';
 
 GRANT ALL PRIVILEGES ON pdns.* TO 'pdns'@'%';
-GRANT ALL PRIVILEGES ON powerdns_admin.* TO 'pda'@'%';
 
 FLUSH PRIVILEGES;
 

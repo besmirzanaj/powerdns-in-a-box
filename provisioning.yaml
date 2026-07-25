@@ -1,0 +1,16 @@
+# provisioning.yaml - first-boot provisioning for PowerDNS-AuthAdmin.
+#
+# Registers the local PowerDNS backend so the UI is immediately usable
+# after first login. Applied once at boot when PROVISION_ON_BOOT=true.
+# To re-apply, delete the `provisioned_at` row from the settings table.
+#
+# The api_key placeholder is substituted in lockstep with .env and
+# pdns/pdns.conf during deploy.
+
+pdns_servers:
+  - slug: pdns-auth
+    name: PowerDNS Authoritative
+    base_url: http://pdns:8081/api/v1
+    server_id: localhost
+    api_key: CHANGE_ME_API_KEY
+    is_default: true
