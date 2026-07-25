@@ -1,44 +1,41 @@
 # powerdns-in-a-box
 
-A self-contained PowerDNS Authoritative + dnsdist + PowerDNS-AuthAdmin + MariaDB
-stack that runs on Rocky Linux 9 with `podman-compose`. Intended deployment
-path is `/root/git/powerdns-in-a-box/` on the target server.
+A self-contained PowerDNS Authoritative + dnsdist + PowerDNS-AuthAdmin stack
+that runs on Rocky Linux 9 with `podman-compose`. Intended deployment path is
+`/root/git/powerdns-in-a-box/` on the target server.
+
+Three containers, no external database — PowerDNS uses the built-in gsqlite3
+backend and PowerDNS-AuthAdmin stores its own data in SQLite (named volume).
 
 ## Stack
 
 | Service                | Image                                              | Role                                       | Host port        |
 | ---------------------- | -------------------------------------------------- | ------------------------------------------ | ---------------- |
 | `dnsdist`              | `powerdns/dnsdist-19:latest`                       | Frontend ACL / load balancer on port 53    | `53/tcp+udp`     |
-| `pdns`                 | `powerdns/pdns-auth-51:latest`                     | Authoritative DNS, gmysql backend          | internal 5300    |
+| `pdns`                 | `powerdns/pdns-auth-51:latest`                     | Authoritative DNS, gsqlite3 backend        | internal 5300    |
 | `powerdns-authadmin`   | `ghcr.io/powerdns-authadmin/powerdns-authadmin`    | Next.js web UI; talks to PowerDNS HTTP API | `9090/tcp`       |
-| `mariadb`              | `mariadb:10.11`                                    | Backend DB for PowerDNS only               | internal 3306    |
 
 DNS queries hit `dnsdist` on port 53, which forwards everything to `pdns` on
 internal port 5300. PowerDNS-AuthAdmin talks to PowerDNS over the compose
 network via the HTTP API at `http://pdns:8081` and stores its own data in
-SQLite (named volume). PowerDNS itself uses the `pdns` database via the
-gmysql backend in MariaDB.
+SQLite (named volume). PowerDNS itself uses the gsqlite3 backend — no
+external database needed.
 
-One database, one SQL user:
-
-- `pdns@%` → owns the `pdns` database (zones, records, DNSSEC keys, ...)
-
-PowerDNS-AuthAdmin never touches the `pdns` database directly — all zone
-changes go through the PowerDNS HTTP API.
+Neither service writes to the other's storage — all zone changes go through
+the PowerDNS HTTP API.
 
 ## Layout
 
 ```
 .
 ├── compose.yml              # podman-compose stack definition
-├── .env                     # passwords, API key, dnsdist bind IP (edit before deploy)
+├── .env                     # API key, dnsdist bind IP (edit before deploy)
 ├── provisioning.yaml        # AuthAdmin first-boot provisioning (PDNS backend config)
-├── pdns/pdns.conf           # PowerDNS authoritative config (gmysql + API)
-├── dnsdist/dnsdist.conf     # dnsdist frontend config
-└── mysql-init/01-init.sql   # one-shot DB init: database + user + PowerDNS schema
+├── pdns/pdns.conf           # PowerDNS authoritative config (gsqlite3 + API)
+└── dnsdist/dnsdist.conf     # dnsdist frontend config
 ```
 
-`mysql-data/` is created on first start and holds the MariaDB data directory.
+`pdns-data` (named compose volume) holds the PowerDNS SQLite database.
 `app-data` (named compose volume) holds the AuthAdmin SQLite database.
 
 ## Prerequisites
@@ -63,9 +60,7 @@ cd /root/git/powerdns-in-a-box
 cp .env.example .env
 chmod 600 .env
 
-# 1. Generate random secrets
-MYSQL_ROOT_PASSWORD=$(openssl rand -hex 16)
-PDNS_DB_PASS=$(openssl rand -hex 16)
+# 1. Generate random secrets (only three needed — no database passwords)
 PDNS_API_KEY=$(openssl rand -hex 24)
 PDA_SECRET_KEY=$(openssl rand -base64 32)
 PDA_ENCRYPTION_KEY=$(openssl rand -base64 32)
@@ -77,10 +72,8 @@ DNSDIST_API_KEY=$(openssl rand -hex 24)
 DNSDIST_BIND_IP="$(curl -s4 ifconfig.me)"     # or hard-code your public IPv4
 TAILSCALE_BIND_IP="$(tailscale ip -4 2>/dev/null || echo '')"
 
-# 3. Substitute into .env, pdns.conf, 01-init.sql and provisioning.yaml in one shot
+# 3. Substitute into .env, pdns.conf and provisioning.yaml
 sed -i \
-  -e "s|CHANGE_ME_MARIADB_ROOT|${MYSQL_ROOT_PASSWORD}|" \
-  -e "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|"             \
   -e "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|"             \
   -e "s|CHANGE_ME_PDA_SECRET|${PDA_SECRET_KEY}|"        \
   -e "s|CHANGE_ME_PDA_ENCRYPTION|${PDA_ENCRYPTION_KEY}|" \
@@ -91,9 +84,8 @@ sed -i \
   -e "s|^TAILSCALE_BIND_IP=.*|TAILSCALE_BIND_IP=${TAILSCALE_BIND_IP}|" \
   .env
 
-sed -i "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|g; s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g" pdns/pdns.conf
-sed -i "s|CHANGE_ME_PDNS_DB|${PDNS_DB_PASS}|g"                                        mysql-init/01-init.sql
-sed -i "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g"                                         provisioning.yaml
+sed -i "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g" pdns/pdns.conf
+sed -i "s|CHANGE_ME_API_KEY|${PDNS_API_KEY}|g" provisioning.yaml
 
 # 4. Free port 53 (see "Port 53" below). Then:
 podman-compose up -d
@@ -126,7 +118,7 @@ via an SSH tunnel.
 
 ## Network model
 
-Three categories of host port:
+Two categories of host port:
 
 | Port      | Bind IP                                  | Visibility                                          |
 | --------- | ---------------------------------------- | --------------------------------------------------- |
@@ -144,19 +136,11 @@ ssh -L 9090:127.0.0.1:9090 -L 8081:127.0.0.1:8081 -L 8083:127.0.0.1:8083 root@<h
 
 ## Configuration cheatsheet
 
-The same secret has to live in multiple places. The Quickstart's `sed`
-commands keep them in sync; if you ever rotate a secret manually,
-remember:
+Only one secret spans multiple files — everything else is single-file:
 
-| Value            | `.env`             | `pdns/pdns.conf`     | `mysql-init/01-init.sql`           | `provisioning.yaml` |
-| ---------------- | ------------------ | -------------------- | ---------------------------------- | ------------------- |
-| PowerDNS DB pass | `PDNS_DB_PASS`     | `gmysql-password`    | `'pdns'@'%' IDENTIFIED BY ...`     | —                   |
-| PowerDNS API key | `PDNS_API_KEY`     | `api-key`            | —                                  | `api_key:`          |
-
-A mismatch is the #1 cause of `ERROR 1045` (MySQL access denied) at
-startup. And remember: `mysql-init/01-init.sql` only runs on first
-boot — if you change passwords later, either `ALTER USER` inside the
-running MariaDB or wipe `mysql-data/` and re-init.
+| Value            | `.env`             | `pdns/pdns.conf`     | `provisioning.yaml` |
+| ---------------- | ------------------ | -------------------- | ------------------- |
+| PowerDNS API key | `PDNS_API_KEY`     | `api-key`            | `api_key:`          |
 
 ## Port 53
 
@@ -202,8 +186,8 @@ Process- and container-level checks. For DNS resolution checks, see the
 next section.
 
 ```bash
-podman-compose ps                                # all four containers Up / healthy
-podman logs -f pdns-auth                         # no gmysql errors, API on :8081
+podman-compose ps                                # all three containers Up / healthy
+podman logs -f pdns-auth                         # no DB errors, API on :8081
 podman logs -f powerdns-authadmin                 # migrations complete, ready on :3000
 ss -lptn 'sport = :53'                           # confirms dnsdist holds the bind IP
 ```
@@ -243,7 +227,7 @@ should contain at least one in-bailiwick name (e.g. `ns.<your.zone>.`) — that
 name must also have a glue A record at the **parent** zone, otherwise no
 recursive resolver can find your server from the root.
 
-### 3. PowerDNS HTTP API (proves pdns ↔ MariaDB is healthy)
+### 3. PowerDNS HTTP API (proves pdns is healthy)
 
 ```bash
 cd /root/git/powerdns-in-a-box
@@ -289,7 +273,7 @@ the delegation and glue at the parent are correctly in place.
 | `dig` output                                   | What it means                                                                                          |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `status: REFUSED` from `@<DNSDIST_BIND_IP>`    | The zone doesn't exist on this server. Create it in PowerDNS-AuthAdmin or via the API first.            |
-| `status: SERVFAIL` from `@<DNSDIST_BIND_IP>`   | pdns is up but can't query its backend — check `podman logs pdns-auth` for gmysql errors.              |
+| `status: SERVFAIL` from `@<DNSDIST_BIND_IP>`   | pdns is up but can't query its backend — check `podman logs pdns-auth` for gsqlite3 errors.            |
 | `status: NXDOMAIN`                             | The record name isn't in the zone. Verify it was added with the right name and trailing dot.           |
 | Correct locally, NXDOMAIN via `@1.1.1.1`       | Parent delegation isn't published. Update the parent zone's NS + glue and wait for its TTL to expire.  |
 | Local answer has no `aa` flag                  | Reply came from a cache, not the authoritative server. Always query the auth IP for validation.        |
@@ -300,9 +284,7 @@ the delegation and glue at the parent are correctly in place.
 | Symptom                                                | Fix                                                                                                                                       |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `bind: address already in use` on port 53              | See "Port 53" — systemd-resolved or aardvark-dns is holding it. Either move them off 53 or bind dnsdist to a specific host IP.            |
-| `Unknown MySQL server host 'mysql'`                    | `pdns.conf` still references the old `mysql` service name. It must say `gmysql-host=mariadb`.                                              |
-| `Table 'pdns.domains' doesn't exist`                   | DB volume was created before the schema was added. `podman-compose down && rm -rf mysql-data && podman-compose up -d`.                    |
-| `ERROR 1410 (42000): not allowed to create user with GRANT` | MariaDB 10.11 inherits MySQL 8's rule that `GRANT` won't auto-create a user. Run `CREATE USER IF NOT EXISTS ...` first.              |
+| `Unable to open database` in pdns logs                 | The `pdns-data` volume ownership wasn't set. `podman-compose down && podman volume rm powerdns-in-a-box_pdns-data && podman-compose up -d`. |
 | PowerDNS-AuthAdmin won't start, `ERR_MODULE_NOT_FOUND` | The SQLite volume is empty on first boot — that's normal. Check `podman logs powerdns-authadmin` for migration errors.                   |
 | PowerDNS-AuthAdmin login fails with CSRF error         | `APP_URL` in `.env` must exactly match the browser URL (scheme + host + port). Session cookies are scoped to this value.                 |
 
@@ -310,14 +292,13 @@ the delegation and glue at the parent are correctly in place.
 
 - The `:Z` volume labels are SELinux relabeling hints for Podman on RHEL-family
   hosts. Leave them in place.
-- `mysql-init/*.sql` runs **only on first MariaDB initialization** (empty data
-  directory). Edits made after the first start do not retroactively apply —
-  either run them manually with `mariadb -uroot -p` or wipe `mysql-data/` and
-  recreate.
 - The example `.env` ships with `CHANGE_ME_*` placeholders. Replace them
-  before any deployment that's reachable from the network. The `pdns.conf`,
-  `01-init.sql`, and `provisioning.yaml` files contain the same placeholders
-  and must be rewritten in lockstep.
-- PowerDNS-AuthAdmin stores its SQLite database on a named compose volume
-  (`app-data`). To reset AuthAdmin without affecting DNS data:
+  before any deployment that's reachable from the network. Only `pdns.conf`
+  and `provisioning.yaml` share the `CHANGE_ME_API_KEY` placeholder with
+  `.env`.
+- To reset PowerDNS zone data without affecting AuthAdmin:
+  `podman-compose down && podman volume rm powerdns-in-a-box_pdns-data && podman-compose up -d`.
+- To reset AuthAdmin without affecting DNS data:
   `podman-compose down && podman volume rm powerdns-in-a-box_app-data && podman-compose up -d`.
+- PowerDNS creates the gsqlite3 schema automatically on first start — no
+  init scripts needed.

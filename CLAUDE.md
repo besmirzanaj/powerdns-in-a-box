@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A `podman-compose` stack that runs a full PowerDNS authoritative DNS service
 behind `dnsdist`, with PowerDNS-AuthAdmin (`ghcr.io/powerdns-authadmin/powerdns-authadmin`)
-as the management UI and MariaDB 10.11 as the PowerDNS backend. The target
-deployment host is **Rocky Linux 9** and the canonical install path on that
-host is `/root/git/powerdns-in-a-box/`. This is config-only — there is nothing
-to build, lint, or test.
+as the management UI. Three containers, no external database: PowerDNS uses
+the built-in gsqlite3 backend and PowerDNS-AuthAdmin stores its own data in
+SQLite on a named volume. The target deployment host is **Rocky Linux 9**
+and the canonical install path on that host is `/root/git/powerdns-in-a-box/`.
+This is config-only — there is nothing to build, lint, or test.
 
-The four containers (`mariadb`, `pdns`, `dnsdist`, `powerdns-authadmin`) are
-wired together by service name on the default compose network. Service names
-act as DNS hostnames inside the network, so changing a service name in
+The three containers (`pdns`, `dnsdist`, `powerdns-authadmin`) are wired
+together by service name on the default compose network, plus a one-shot
+`pdns-init` container that sets ownership on the SQLite data volume. Service
+names act as DNS hostnames inside the network, so changing a service name in
 `compose.yml` requires updating every other config that references it.
 
 PowerDNS-AuthAdmin is a Next.js app that stores its own data in SQLite on a
@@ -25,46 +27,29 @@ record change goes through the PowerDNS HTTP API on `http://pdns:8081`.
 A working stack requires values to stay byte-for-byte identical across files.
 The most common failure mode is one of them drifting:
 
-| Value             | `.env`                  | `pdns/pdns.conf`       | `mysql-init/01-init.sql`           | `provisioning.yaml` |
-| ----------------- | ----------------------- | ---------------------- | ---------------------------------- | ------------------- |
-| PowerDNS DB pass  | `PDNS_DB_PASS`          | `gmysql-password=`     | `'pdns'@'%' IDENTIFIED BY ...`     | —                   |
-| PowerDNS API key  | `PDNS_API_KEY`          | `api-key=`             | —                                  | `api_key:`          |
-| DB hostname       | implicit via compose    | `gmysql-host=mariadb`  | —                                  | —                   |
+| Value             | `.env`                  | `pdns/pdns.conf`       | `provisioning.yaml` |
+| ----------------- | ----------------------- | ---------------------- | ------------------- |
+| PowerDNS API key  | `PDNS_API_KEY`          | `api-key=`             | `api_key:`          |
 
-If anything in `pdns/pdns.conf` says `gmysql-host=mysql` instead of `mariadb`,
-the authoritative server will crash with `Unknown MySQL server host 'mysql'`.
-That is a leftover from an earlier iteration of the design.
+Unlike the earlier versions of this stack (which ran MariaDB and had
+passwords across three files), there is only one multi-file secret.
+Everything else is single-file configuration.
 
 `DNSDIST_BIND_IP` in `.env` is the host IP that dnsdist binds port 53 to. Set
 this to the server's public IPv4 when another process is already on
 `0.0.0.0:53` (commonly `aardvark-dns` from a co-tenant podman stack). Leave it
 blank to let dnsdist bind `0.0.0.0:53`.
 
-## The mysql-init trap
+## The pdns-init container
 
-`mysql-init/01-init.sql` is executed by the MariaDB container **only on first
-initialization of an empty `mysql-data/` data directory**. Editing it after
-the first start has no effect on the running database. Two ways forward when
-the schema or credentials need to change:
+`pdns-init` is a one-shot Alpine container that creates the
+`/var/lib/powerdns` directory on the `pdns-data` named volume and chowns it
+to uid 953 (the `pdns` user inside the official PowerDNS image). This runs
+*before* pdns starts and exits with success. If the volume is ever wiped or
+recreated, this init step runs again automatically.
 
-- Destructive (loses all DNS data): `podman-compose down && rm -rf mysql-data
-  && podman-compose up -d`.
-- Non-destructive: `podman exec -it pdns-mariadb mariadb -uroot -p` and run
-  `ALTER USER` / `CREATE USER IF NOT EXISTS` / `GRANT` / `CREATE TABLE`
-  manually.
-
-The init script uses `CHANGE_ME_*` placeholders for passwords — deployment
-rewrites them in place to match the secrets in `.env` before the container's
-first boot. If you ever wipe `mysql-data/` and replay the init, make sure
-those placeholders have been substituted with the same values that are in
-`.env` and `pdns/pdns.conf`.
-
-MariaDB 10.11 inherits MySQL 8's stricter user rules: `GRANT ... TO
-'user'@'host'` fails with `ERROR 1410` if the user/host pair does not already
-exist. Always `CREATE USER IF NOT EXISTS` before granting. MySQL also treats
-`'user'@'%'` and `'user'@'localhost'` as distinct accounts — both must exist
-and have matching passwords if you want both container-network and host-local
-logins to work.
+PowerDNS with the gsqlite3 backend creates its schema tables on first boot
+when the database file doesn't exist — no init scripts or SQL files needed.
 
 ## PowerDNS-AuthAdmin specifics
 
@@ -72,8 +57,8 @@ logins to work.
   user + PDNS backend connection automatically from environment variables and
   a provisioning YAML file. No manual UI configuration needed.
 - SQLite database lives on the `app-data` named volume. To reset without
-  affecting MariaDB: `podman-compose down && podman volume rm powerdns-in-a-box_app-data && podman-compose up -d`.
-- `APP_URL` in the container environment (set from `PDA_SECRET_KEY` / `TAILSCALE_BIND_IP`
+  affecting PowerDNS zone data: `podman-compose down && podman volume rm powerdns-in-a-box_app-data && podman-compose up -d`.
+- `APP_URL` in the container environment (set from `TAILSCALE_BIND_IP`
   in `.env`) must exactly match the URL operators type in their browser
   (scheme + host + port). Session cookies are scoped to this value.
 - `PDA_SECRET_KEY` (maps to AuthAdmin's `APP_SECRET_KEY`) is the session
@@ -86,9 +71,6 @@ logins to work.
   root, mounted into the container at `/etc/powerdns-authadmin/provisioning.yaml`.
   To re-apply provisioning, delete the `provisioned_at` row from the
   settings table in the SQLite DB.
-- On MariaDB side this stack now only creates the `pdns` database and user.
-  The `powerdns_admin` database and `pda` user are gone — AuthAdmin uses its
-  own SQLite file.
 
 ## Host prep for port 53
 
@@ -126,8 +108,13 @@ podman-compose down
 podman volume rm powerdns-in-a-box_app-data
 podman-compose up -d
 
-# Inspect or repair the MariaDB backend
-podman exec -it pdns-mariadb mariadb -uroot -p
+# Reset PowerDNS zone data without affecting AuthAdmin
+podman-compose down
+podman volume rm powerdns-in-a-box_pdns-data
+podman-compose up -d
+
+# Inspect the PowerDNS SQLite database
+podman exec -it pdns-auth sqlite3 /var/lib/powerdns/pdns.sqlite
 
 # Inspect the AuthAdmin SQLite database (inside the container)
 podman exec -it powerdns-authadmin sqlite3 /data/powerdns_authadmin.db
