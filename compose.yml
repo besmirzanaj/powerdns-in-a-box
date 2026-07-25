@@ -17,11 +17,14 @@ services:
       - sh
       - -c
       - |
+        apk add --no-cache sqlite >/dev/null
         mkdir -p /var/lib/powerdns
+        sqlite3 /var/lib/powerdns/pdns.sqlite < /schema.sql
         chown -R 953:953 /var/lib/powerdns
         chmod -R u+rwX /var/lib/powerdns
     volumes:
       - pdns-data:/var/lib/powerdns
+      - ./pdns/schema.sqlite3.sql:/schema.sql:ro
 
   pdns:
     image: docker.io/powerdns/pdns-auth-51:latest
