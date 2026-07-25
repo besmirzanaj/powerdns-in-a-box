@@ -51,8 +51,7 @@ the Postgres override.
 
 ## Prerequisites
 
-- Rocky Linux 9 (or RHEL/Alma 9)
-- `podman` and `podman-compose` installed
+- A Linux instance with Docker and Docker Compose (or Podman + podman-compose) installed
 - Port 53 free on the IP that `DNSDIST_BIND_IP` points at (see "Port 53" below)
 - A Tailscale-joined host if you want to reach the management UIs in a
   browser without an SSH tunnel — optional, see "Network model" below
